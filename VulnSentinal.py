@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # VulnSentinal - Consolidated vulnerability and exploit intelligence assistant
-# Originally inspired by Exploit Eye by Jolanda de Koff (BullsEye0)
+# Inspired by earlier research tools, rewritten and rebranded.
 
 import os
 import re
@@ -11,6 +11,12 @@ from datetime import datetime, timedelta
 
 import requests
 
+# Try Python 3.11+ stdlib TOML first, otherwise use 'toml' package
+try:
+    import tomllib  # Python 3.11+
+except ModuleNotFoundError:
+    import toml as tomllib  # type: ignore
+
 # Color constants
 RED = "\033[1;31m"
 BLUE = "\033[1;34m"
@@ -19,9 +25,65 @@ RESET = "\033[0m"
 
 HTTP_TIMEOUT = 30
 MAX_RESULTS_LIMIT = 100
+CONFIG_PATH = "vulnsentinal.toml"
 
-NVD_API_KEY = os.getenv("NVD_API_KEY")
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+
+def load_config(path: str = CONFIG_PATH):
+    """
+    Load configuration from vulnsentinal.toml if present.
+
+    Structure:
+
+    [api]
+    nvd_api_key = "..."
+    github_token = "..."
+
+    [defaults]
+    days_lookback = 7
+    min_severity = "CRITICAL"
+    max_results = 20
+    """
+    config = {
+        "api": {
+            "nvd_api_key": None,
+            "github_token": None,
+        },
+        "defaults": {
+            "days_lookback": 7,
+            "min_severity": "CRITICAL",
+            "max_results": 20,
+        },
+    }
+
+    if not os.path.isfile(path):
+        return config
+
+    try:
+        # tomllib.load requires binary file handle
+        with open(path, "rb") as f:
+            raw = tomllib.load(f)
+
+        if isinstance(raw, dict):
+            if "api" in raw and isinstance(raw["api"], dict):
+                config["api"].update(raw["api"])
+            if "defaults" in raw and isinstance(raw["defaults"], dict):
+                config["defaults"].update(raw["defaults"])
+    except Exception as e:
+        print(f"{RED}[!] Failed to load config file '{path}': {e}{RESET}")
+        print("[!] Using built-in defaults instead.\n")
+
+    return config
+
+
+CONFIG = load_config()
+
+# Environment variables override config file
+NVD_API_KEY = os.getenv("NVD_API_KEY") or CONFIG["api"].get("nvd_api_key")
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN") or CONFIG["api"].get("github_token")
+
+DEFAULT_DAYS_LOOKBACK = int(CONFIG["defaults"].get("days_lookback", 7))
+DEFAULT_MIN_SEVERITY = str(CONFIG["defaults"].get("min_severity", "CRITICAL")).upper()
+DEFAULT_MAX_RESULTS = int(CONFIG["defaults"].get("max_results", 20))
 
 
 def banner():
@@ -60,11 +122,22 @@ def show_about():
     print("  • Search vulnerabilities by keyword, vendor, or specific CVE ID")
     print("  • Jump directly to Exploit-DB search results")
     print("  • Discover PoC / offensive tooling on GitHub\n")
-    print("Environment variables (optional but recommended):")
-    print("  • NVD_API_KEY    – NVD API key for better reliability & quota")
-    print("  • GITHUB_TOKEN   – GitHub token to avoid public rate limits\n")
-    print("Tip: Use this as a reconnaissance and research aid,")
-    print("     not as an automated exploitation platform.\n")
+    print("Configuration order of precedence (highest first):")
+    print("  1) Environment variables (NVD_API_KEY, GITHUB_TOKEN)")
+    print("  2) vulnsentinal.toml in the current directory")
+    print("  3) Built-in defaults\n")
+    print("Example config file: vulnsentinal.toml")
+    print("""
+[api]
+nvd_api_key = "YOUR_NVD_API_KEY"
+github_token = "YOUR_GITHUB_TOKEN"
+
+[defaults]
+days_lookback = 7
+min_severity = "CRITICAL"
+max_results = 20
+""")
+    print("Use this strictly as a reconnaissance and research aid.\n")
 
 
 def http_get(url, params=None, headers=None, timeout=HTTP_TIMEOUT, retries=1):
@@ -142,7 +215,9 @@ def validate_cve_id(cve_id):
     return bool(CVE_REGEX.match(cve_id))
 
 
-def clamp_results(value, default=20):
+def clamp_results(value, default=None):
+    if default is None:
+        default = DEFAULT_MAX_RESULTS
     try:
         v = int(value)
     except (TypeError, ValueError):
@@ -165,7 +240,12 @@ def prompt_export_json(data, default_filename):
         print(f"{RED}[!] Failed to write file: {e}{RESET}")
 
 
-def get_latest_cves(days=7, severity="CRITICAL"):
+def get_latest_cves(days=None, severity=None):
+    if days is None:
+        days = DEFAULT_DAYS_LOOKBACK
+    if severity is None:
+        severity = DEFAULT_MIN_SEVERITY
+
     print(f"\n[*] Gathering recent alerts from last {days} day(s) with severity: {severity}...")
     try:
         end_date = datetime.utcnow()
@@ -222,8 +302,8 @@ def get_latest_cves(days=7, severity="CRITICAL"):
         print(f"{RED}[!] Error while fetching recent CVEs: {e}{RESET}")
 
 
-def search_cve_keyword(keyword, max_results=20):
-    max_results = clamp_results(max_results)
+def search_cve_keyword(keyword, max_results=None):
+    max_results = clamp_results(max_results or DEFAULT_MAX_RESULTS)
     print(f"\n[*] Threat surface lookup for: {keyword}")
     print(f"[*] Max results this page: {max_results}")
 
@@ -251,7 +331,7 @@ def search_cve_keyword(keyword, max_results=20):
         print(f"\n[✓] Showing {len(vulns)} result(s) (total reported by NVD: {total}).\n")
         if total > len(vulns):
             print("[!] NVD reports more results than returned in this page. "
-                  "Refine your keyword or increase resultsPerPage (up to 100).\n")
+                  "Refine your keyword or adjust resultsPerPage (up to 100).\n")
 
         for idx, wrapper in enumerate(vulns, start=1):
             vuln = wrapper.get("cve", {})
@@ -301,8 +381,8 @@ def search_exploitdb(keyword):
         print(f"{RED}[!] Error while contacting Exploit-DB: {e}{RESET}")
 
 
-def search_github(keyword, max_results=20):
-    max_results = clamp_results(max_results)
+def search_github(keyword, max_results=None):
+    max_results = clamp_results(max_results or DEFAULT_MAX_RESULTS)
     print(f"\n[*] Offensive toolkit discovery for: {keyword}")
     print(f"[*] Max repositories to display: {max_results}")
 
@@ -435,27 +515,30 @@ def main():
             choice = input(f"\n{BLUE}[+]{RESET} Select action: ").strip()
 
             if choice == "1":
-                days_raw = input("\n[+] Look back how many days? (default 7): ").strip()
-                days = int(days_raw) if days_raw else 7
+                days_raw = input(f"\n[+] Look back how many days? (default {DEFAULT_DAYS_LOOKBACK}): ").strip()
+                try:
+                    days = int(days_raw) if days_raw else DEFAULT_DAYS_LOOKBACK
+                except ValueError:
+                    days = DEFAULT_DAYS_LOOKBACK
                 if days < 1:
                     days = 1
-                severity_raw = input("[+] Minimum severity [CRITICAL/HIGH/MEDIUM/LOW] (default CRITICAL): ").strip().upper()
+                severity_raw = input(f"[+] Minimum severity [CRITICAL/HIGH/MEDIUM/LOW] (default {DEFAULT_MIN_SEVERITY}): ").strip().upper()
                 if severity_raw not in ("CRITICAL", "HIGH", "MEDIUM", "LOW"):
-                    severity_raw = "CRITICAL"
+                    severity_raw = DEFAULT_MIN_SEVERITY
                 get_latest_cves(days=days, severity=severity_raw)
 
             elif choice == "2":
                 keyword = input("\n[+] Enter keyword for threat lookup: ").strip()
                 if keyword:
-                    max_raw = input("[+] Max results (default 20, max 100): ").strip()
-                    max_results = clamp_results(max_raw or 20)
+                    max_raw = input(f"[+] Max results (default {DEFAULT_MAX_RESULTS}, max {MAX_RESULTS_LIMIT}): ").strip()
+                    max_results = clamp_results(max_raw or DEFAULT_MAX_RESULTS)
                     search_cve_keyword(keyword, max_results)
 
             elif choice == "3":
                 vendor = input("\n[+] Enter vendor/product identifier: ").strip()
                 if vendor:
-                    max_raw = input("[+] Max results (default 20, max 100): ").strip()
-                    max_results = clamp_results(max_raw or 20)
+                    max_raw = input(f"[+] Max results (default {DEFAULT_MAX_RESULTS}, max {MAX_RESULTS_LIMIT}): ").strip()
+                    max_results = clamp_results(max_raw or DEFAULT_MAX_RESULTS)
                     search_cve_keyword(vendor, max_results)
 
             elif choice == "4":
@@ -471,8 +554,8 @@ def main():
             elif choice == "6":
                 keyword = input("\n[+] GitHub search term (product, CVE, etc.): ").strip()
                 if keyword:
-                    max_raw = input("[+] Max repositories (default 20, max 100): ").strip()
-                    max_results = clamp_results(max_raw or 20)
+                    max_raw = input(f"[+] Max repositories (default {DEFAULT_MAX_RESULTS}, max {MAX_RESULTS_LIMIT}): ").strip()
+                    max_results = clamp_results(max_raw or DEFAULT_MAX_RESULTS)
                     search_github(keyword, max_results)
 
             elif choice == "7":
@@ -488,8 +571,6 @@ def main():
         except KeyboardInterrupt:
             print(f"\n\n{BLUE}[*] Interrupted. Exiting VulnSentinal.{RESET}\n")
             sys.exit(0)
-        except ValueError:
-            print(f"\n{RED}[-] Invalid numeric input.{RESET}")
         except Exception as e:
             print(f"\n{RED}[!] Unexpected error: {e}{RESET}")
 
