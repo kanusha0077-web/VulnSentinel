@@ -1,0 +1,21 @@
+# Copy this file to 'vulnsentinal.toml' and adjust as needed.
+
+[api]
+# Optional: NVD API key for higher rate limits and reliability.
+# You can also set this via environment variable NVD_API_KEY.
+nvd_api_key = "YOUR_NVD_API_KEY"
+
+# Optional: GitHub token to avoid anonymous rate limits.
+# You can also set this via environment variable GITHUB_TOKEN.
+github_token = "YOUR_GITHUB_TOKEN"
+
+[defaults]
+# Default lookback window in days for recent CVEs (menu option 1).
+days_lookback = 7
+
+# Default minimum severity for the "Recent High-Risk Alerts" view.
+# Allowed values: CRITICAL, HIGH, MEDIUM, LOW
+min_severity = "CRITICAL"
+
+# Default max results for NVD and GitHub searches (clamped to 1..100).
+max_results = 20
