@@ -107,6 +107,8 @@ All requests identify themselves with a dedicated User-Agent string.
 ```bash
 git clone https://github.com/YOUR_USERNAME/vulnsentinal.git
 cd vulnsentinal
+```bash
+```
 
 2. Create and activate a virtual environment (recommended)
 python3 -m venv venv
